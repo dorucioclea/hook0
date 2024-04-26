@@ -67,6 +67,7 @@ pub enum Hook0Problem {
     InternalServerError,
     Forbidden,
     ServiceUnavailable(HealthCheck),
+    EmailSending(String),
 }
 
 impl From<sqlx::Error> for Hook0Problem {
@@ -136,6 +137,32 @@ impl ResponseError for Hook0Problem {
             .body(json)
     }
 }
+
+impl From<lettre::error::Error> for Hook0Problem {
+    fn from(err: lettre::error::Error) -> Hook0Problem {
+        Hook0Problem::EmailSending(err.to_string())
+    }
+}
+
+impl From<lettre::transport::smtp::Error> for Hook0Problem {
+    fn from(err: lettre::transport::smtp::Error) -> Hook0Problem {
+        Hook0Problem::EmailSending(err.to_string())
+    }
+}
+
+impl From<mrml::prelude::parser::Error> for Hook0Problem {
+    fn from(err: mrml::prelude::parser::Error) -> Hook0Problem {
+        Hook0Problem::EmailSending(err.to_string())
+    }
+}
+
+impl From<mrml::prelude::render::Error> for Hook0Problem {
+    fn from(err: mrml::prelude::render::Error) -> Hook0Problem {
+        Hook0Problem::EmailSending(err.to_string())
+    }
+}
+
+impl std::error::Error for Hook0Problem {}
 
 #[derive(Debug, Clone)]
 pub struct Problem {
@@ -410,6 +437,13 @@ impl From<Hook0Problem> for Problem {
                 detail: format!("{h}.").into(),
                 validation: None,
                 status: StatusCode::SERVICE_UNAVAILABLE,
+            },
+            Hook0Problem::EmailSending(e) => Problem {
+                id: Hook0Problem::EmailSending(e.to_owned()),
+                title: "Could not send email",
+                detail: format!("{e}.").into(),
+                validation: None,
+                status: StatusCode::INTERNAL_SERVER_ERROR,
             },
         }
     }

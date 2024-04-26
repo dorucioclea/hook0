@@ -1,4 +1,7 @@
+use crate::mailer::Mailer;
+use crate::problems::Hook0Problem;
 use ::hook0_client::Hook0Client;
+use actix::fut::result;
 use actix::Arbiter;
 use actix_cors::Cors;
 use actix_files::{Files, NamedFile};
@@ -7,6 +10,7 @@ use actix_web::{http, App, HttpServer};
 use biscuit_auth::{KeyPair, PrivateKey};
 use clap::builder::{BoolValueParser, TypedValueParser};
 use clap::{crate_name, ArgGroup, Parser};
+use lettre::Address;
 use log::{debug, info, trace, warn};
 use paperclip::actix::{web, OpenApiExt};
 use reqwest::Url;
@@ -19,6 +23,7 @@ mod extractor_user_ip;
 mod handlers;
 mod hook0_client;
 mod iam;
+mod mailer;
 mod materialized_views;
 mod middleware_biscuit;
 mod middleware_get_user_ip;
@@ -223,6 +228,22 @@ struct Config {
     /// If true, old events will be reported and cleaned up; if false (default), they will only be reported
     #[clap(long, env, default_value = "false")]
     old_events_cleanup_report_and_delete: bool,
+
+    /// Sender email address
+    #[clap(long, env)]
+    email_sender_address: Address,
+
+    /// Sender name
+    #[clap(long, env, default_value = "Hook0")]
+    email_sender_name: String,
+
+    /// Connection URL to SMTP server; for example: `smtp://localhost:1025`, `smtps://user:password@provider.com:465` (SMTP over TLS) or `smtp://user:password@provider.com:465?tls=required` (SMTP with STARTTLS)
+    #[clap(long, env, hide_env_values = true)]
+    smtp_connection_url: String,
+
+    /// Duration (in second) to use as timeout when sending emails to the SMTP server
+    #[clap(long, env, default_value = "5")]
+    smtp_timeout_in_s: u64,
 }
 
 fn parse_biscuit_private_key(input: &str) -> Result<PrivateKey, String> {
@@ -235,6 +256,7 @@ fn parse_biscuit_private_key(input: &str) -> Result<PrivateKey, String> {
 pub struct State {
     db: PgPool,
     biscuit_private_key: PrivateKey,
+    mailer: Mailer,
     #[cfg(feature = "migrate-users-from-keycloak")]
     keycloak_url: Url,
     #[cfg(feature = "migrate-users-from-keycloak")]
@@ -263,6 +285,21 @@ async fn main() -> anyhow::Result<()> {
             &config.sentry_dsn,
             &config.sentry_traces_sample_rate,
         );
+
+        // Prepare trusted reverse proxies IPs
+        let reverse_proxy_ips = config
+            .reverse_proxy_ips
+            .iter()
+            .map(|str| str.trim().to_owned())
+            .collect::<Vec<_>>();
+        if reverse_proxy_ips.is_empty() {
+            warn!("No trusted reverse proxy IPs were set; if this is a production instance this is a problem");
+        } else {
+            debug!(
+                "The following IPs will be considered as trusted reverse proxies: {}",
+                &reverse_proxy_ips.join(", ")
+            );
+        }
 
         trace!("Starting {}", APP_TITLE);
 
@@ -376,10 +413,21 @@ async fn main() -> anyhow::Result<()> {
             .await;
         });
 
+        // Create Mailer
+        let mailer = mailer::Mailer::new(
+            &config.smtp_connection_url,
+            Duration::from_secs(config.smtp_timeout_in_s),
+            config.email_sender_name,
+            config.email_sender_address,
+        )
+        .await
+        .unwrap();
+
         // Initialize state
         let initial_state = State {
             db: pool,
             biscuit_private_key,
+            mailer,
             #[cfg(feature = "migrate-users-from-keycloak")]
             keycloak_url: config.keycloak_url,
             #[cfg(feature = "migrate-users-from-keycloak")]
